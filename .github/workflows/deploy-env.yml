@@ -40,9 +40,10 @@ jobs:
       - name: Configure kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "${PROJECT}-${{ inputs.environment }}"
 
+      - uses: aws-actions/amazon-ecr-login@v2 # cosign needs registry auth to read manifests
+      - uses: sigstore/cosign-installer@v3
       - name: Verify image signatures
-        uses: sigstore/cosign-installer@v3
-      - run: |
+        run: |
           REG=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com
           for s in products orders gateway; do
             cosign verify "$REG/$PROJECT/$s:${{ inputs.image_tag }}" \

@@ -65,12 +65,14 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,scope=${{ matrix.service }},mode=max
       - name: Trivy gate (CRITICAL)
-        uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/${{ matrix.service }}:${{ steps.meta.outputs.tag }}
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
+        # Official image instead of trivy-action: deterministic, and Trivy authenticates to ECR with the job's AWS creds.
+        run: |
+          docker run --rm \
+            -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
+            aquasec/trivy:0.74.0 image \
+              --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+              "${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/${{ matrix.service }}:${{ steps.meta.outputs.tag }}"
       - uses: sigstore/cosign-installer@v3
       - name: Sign image (keyless, OIDC)
         env: { COSIGN_YES: "true" }

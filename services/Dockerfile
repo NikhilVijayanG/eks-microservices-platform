@@ -17,7 +17,12 @@ ENV NODE_ENV=production \
     APP_VERSION=${APP_VERSION} \
     NODE_OPTIONS=--enable-source-maps
 WORKDIR /app
-RUN addgroup -S app && adduser -S -G app -u 10001 app
+# Patch OS packages and remove npm/corepack: the runtime only needs the node binary, and npm's
+# bundled deps (tar, minimatch, glob…) are the main source of scanner findings.
+# apk 3.x exits 99 after upgrading itself, so run the upgrade twice.
+RUN (apk upgrade --no-cache || apk upgrade --no-cache) \
+ && rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn* /root/.npm \
+ && addgroup -S app && adduser -S -G app -u 10001 app
 COPY --from=deps --chown=app:app /app/node_modules ./node_modules
 COPY --chown=app:app ${SERVICE}/package.json ./
 COPY --chown=app:app ${SERVICE}/src ./src

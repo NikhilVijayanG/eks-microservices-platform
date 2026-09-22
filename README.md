@@ -171,7 +171,30 @@ Roughly: EKS control plane $73/mo + NAT ~$35 + nodes ~$30 + EBS/ALB ~$25 ≈ **$
 Run `make destroy ENV=dev` when not in use. Prod defaults (3 AZ, NAT per AZ, on-demand system
 pool, HA monitoring) start around $500/month before application load.
 
-## Verification performed
+## Live deployment (dev) – verified
+
+This platform was applied for real to account `064580992425` / `us-east-1` on 2026-09-22:
+
+- `terraform apply` created 77 resources (VPC, EKS 1.30, 2× m7i-flex.large nodes, addons, monitoring).
+- Images built, Trivy-scanned (0 CRITICAL/HIGH), cosign-signed and pushed by GitHub Actions via OIDC.
+- The **Build & Deploy** workflow deployed to the cluster end to end (signature verify → render →
+  server-side apply → rollout → in-cluster smoke test); the gateway serves `/version` with the CI tag.
+- Prometheus: 23/23 targets up incl. all service pods; 12 SLO/alert rules loaded; HPA scaled the gateway
+  under load. Loki receives pod logs. Grafana (via ALB) has the RED dashboard with live data.
+
+Issues found and fixed during the real run (kept in git history):
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Node group stuck `CREATING` 25 min, ASG `InvalidParameterCombination … not eligible for Free Tier` | Account is on the **AWS Free Tier plan**, which only allows free-tier-eligible instance types | dev uses `m7i-flex.large` on-demand (see `envs/dev/main.tf`) |
+| `terraform plan`: *Invalid count argument* in IRSA module | `count` depended on an unknown policy JSON | explicit `attach_inline_policy` bool |
+| OIDC `Not authorized to perform sts:AssumeRoleWithWebIdentity` | GitHub now issues ID-suffixed subjects `repo:owner@<id>/name@<id>:…` | trust policy accepts both formats |
+| `trivy-action` could not download its binary | action installer flakiness | run `aquasec/trivy` container directly |
+| Trivy: CRITICAL/HIGH in `npm`'s bundled `tar`, `minimatch`, `glob`, OpenSSL | npm ships in the node base image | runtime stage removes npm/corepack and runs `apk upgrade` |
+| Smoke pod rejected: *violates PodSecurity "restricted"* | probe pod was not hardened | hardened `securityContext` via `--overrides` |
+| SSA dry-run *conflict with "kubectl"* on `image` | earlier `rollout undo` took field ownership | dry-run uses `--force-conflicts` like apply |
+
+## Verification performed (offline)
 
 - `terraform fmt -check` and `terraform validate` pass for `bootstrap`, `envs/dev`, `envs/prod`.
 - `kubectl kustomize` renders 24 resources per overlay; `kubeconform -strict` validates all 48

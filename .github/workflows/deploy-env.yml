@@ -74,7 +74,7 @@ jobs:
           grep 'image: ' "$RUNNER_TEMP/manifests.yaml" | sort -u
 
       - name: Server-side dry run
-        run: kubectl apply --server-side --dry-run=server -f "$RUNNER_TEMP/manifests.yaml"
+        run: kubectl apply --server-side --force-conflicts --dry-run=server -f "$RUNNER_TEMP/manifests.yaml"
 
       - name: Record previous revisions (for rollback)
         run: |

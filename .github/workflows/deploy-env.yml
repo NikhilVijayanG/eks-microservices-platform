@@ -98,13 +98,27 @@ jobs:
 
       - name: Smoke test via gateway
         id: smoke
+        # The namespace enforces the "restricted" Pod Security Standard, so the probe pod must be hardened too.
         run: |
-          kubectl -n "$NAMESPACE" run smoke-${{ github.run_id }} --rm -i --restart=Never --image=curlimages/curl:8.10.1 --command -- sh -c '
-            set -e
-            for i in $(seq 1 30); do curl -fsS http://gateway:8080/healthz && break; sleep 2; done
-            curl -fsS http://gateway:8080/api/products | grep -q items
-            curl -fsS -X POST http://gateway:8080/api/orders -H "content-type: application/json" -d "{\"productId\":\"p-100\",\"quantity\":1}" | grep -q total
-            echo; echo "smoke OK"'
+          cat > "$RUNNER_TEMP/smoke.sh" <<'SH'
+          set -e
+          for i in $(seq 1 30); do curl -fsS http://gateway:8080/healthz && break; sleep 2; done
+          curl -fsS http://gateway:8080/api/products | grep -q items
+          curl -fsS -X POST http://gateway:8080/api/orders -H 'content-type: application/json' \
+            -d '{"productId":"p-100","quantity":1}' | grep -q total
+          echo; echo "smoke OK"
+          SH
+          OVERRIDES=$(jq -cn --arg script "$(cat "$RUNNER_TEMP/smoke.sh")" '{
+            spec: {
+              securityContext: { runAsNonRoot: true, runAsUser: 65532, seccompProfile: { type: "RuntimeDefault" } },
+              containers: [{
+                name: "smoke", image: "curlimages/curl:8.10.1", command: ["sh", "-c", $script],
+                securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
+              }]
+            }
+          }')
+          kubectl -n "$NAMESPACE" run "smoke-${{ github.run_id }}" --rm -i --restart=Never \
+            --image=curlimages/curl:8.10.1 --overrides="$OVERRIDES"
 
       - name: Rollback on failure
         if: failure() && (steps.rollout.outcome == 'failure' || steps.smoke.outcome == 'failure')

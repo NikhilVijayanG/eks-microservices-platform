@@ -2,15 +2,15 @@
 # Grafana, node-exporter, kube-state-metrics) + Loki/Promtail for logs.
 
 terraform {
+  required_version = ">= 1.6"
   required_providers {
-    aws        = { source = "hashicorp/aws" }
-    helm       = { source = "hashicorp/helm" }
-    kubernetes = { source = "hashicorp/kubernetes" }
-    random     = { source = "hashicorp/random" }
+    aws        = { source = "hashicorp/aws", version = ">= 5.60" }
+    helm       = { source = "hashicorp/helm", version = ">= 2.12" }
+    kubernetes = { source = "hashicorp/kubernetes", version = ">= 2.25" }
+    random     = { source = "hashicorp/random", version = ">= 3.5" }
   }
 }
 
-data "aws_region" "current" {}
 
 resource "kubernetes_namespace_v1" "monitoring" {
   metadata {

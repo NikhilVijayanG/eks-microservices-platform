@@ -1,8 +1,9 @@
 # One ECR repository per microservice with scan-on-push and lifecycle cleanup.
 
 terraform {
+  required_version = ">= 1.6"
   required_providers {
-    aws = { source = "hashicorp/aws" }
+    aws = { source = "hashicorp/aws", version = ">= 5.60" }
   }
 }
 

@@ -1,7 +1,6 @@
 # EKS cluster with managed node groups, IRSA (OIDC), envelope encryption, control-plane logging
 # and the core managed addons (vpc-cni, coredns, kube-proxy, ebs-csi, pod-identity-agent).
 
-data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
 # ---------------------------------------------------------------- IAM: cluster

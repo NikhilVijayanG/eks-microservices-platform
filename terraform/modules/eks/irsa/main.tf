@@ -1,8 +1,9 @@
 # Reusable IAM Role for Service Accounts (IRSA).
 
 terraform {
+  required_version = ">= 1.6"
   required_providers {
-    aws = { source = "hashicorp/aws" }
+    aws = { source = "hashicorp/aws", version = ">= 5.60" }
   }
 }
 

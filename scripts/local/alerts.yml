@@ -1,0 +1,79 @@
+groups:
+- name: microservices.slo
+  rules:
+  - expr: sum by (service, route) (rate(http_requests_total[5m]))
+    record: service:http_requests:rate5m
+  - expr: "sum by (service) (rate(http_requests_total{status=~\"5..\"}[5m]))\n  /\nsum by (service) (rate(http_requests_total[5m]))\n"
+    record: service:http_errors:ratio5m
+  - expr: histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m])))
+    record: service:http_latency_p95:5m
+  - expr: histogram_quantile(0.99, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m])))
+    record: service:http_latency_p99:5m
+- name: microservices.alerts
+  rules:
+  - alert: ServiceHighErrorRate
+    annotations:
+      description: More than 5% of requests to {{ $labels.service }} failed over the last 5 minutes.
+      runbook_url: https://github.com/OWNER/REPO/blob/main/docs/runbooks/high-error-rate.md
+      summary: '{{ $labels.service }} 5xx ratio is {{ $value | humanizePercentage }}'
+    expr: service:http_errors:ratio5m > 0.05
+    for: 5m
+    labels:
+      severity: critical
+  - alert: ServiceHighLatencyP95
+    annotations:
+      description: p95 latency above 500ms for 10 minutes.
+      summary: '{{ $labels.service }} p95 latency is {{ $value | humanizeDuration }}'
+    expr: service:http_latency_p95:5m > 0.5
+    for: 10m
+    labels:
+      severity: warning
+  - alert: ServiceDown
+    annotations:
+      description: Prometheus cannot scrape any pod of {{ $labels.service }}.
+      summary: '{{ $labels.service }} has no healthy scrape targets'
+    expr: sum by (service) (up{job=~"products|orders|gateway"}) == 0
+    for: 2m
+    labels:
+      severity: critical
+  - alert: UpstreamDependencyFailing
+    annotations:
+      description: More than 10% of calls from {{ $labels.service }} to {{ $labels.upstream }} are failing.
+      summary: '{{ $labels.service }} -> {{ $labels.upstream }} failing'
+    expr: "sum by (service, upstream) (rate(upstream_request_duration_seconds_count{status=~\"5..|error\"}[5m]))\n  /\nsum by (service, upstream) (rate(upstream_request_duration_seconds_count[5m])) > 0.1\n"
+    for: 5m
+    labels:
+      severity: warning
+  - alert: PodCrashLooping
+    annotations:
+      description: Container {{ $labels.container }} restarted more than 3 times in 15 minutes.
+      summary: '{{ $labels.namespace }}/{{ $labels.pod }} restarting'
+    expr: increase(kube_pod_container_status_restarts_total{namespace="microservices"}[15m]) > 3
+    for: 5m
+    labels:
+      severity: warning
+  - alert: HPAAtMaxReplicas
+    annotations:
+      description: Consider raising maxReplicas or investigating load.
+      summary: HPA {{ $labels.horizontalpodautoscaler }} pinned at max
+    expr: "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"microservices\"}\n  >= kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"microservices\"}\n"
+    for: 15m
+    labels:
+      severity: warning
+  - alert: ContainerMemoryNearLimit
+    annotations:
+      description: Risk of OOMKill.
+      summary: '{{ $labels.pod }}/{{ $labels.container }} memory > 90% of limit'
+    expr: "max by (namespace, pod, container) (container_memory_working_set_bytes{namespace=\"microservices\", container!=\"\"})\n  /\nmax by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=\"\
+      microservices\", resource=\"memory\"}) > 0.9\n"
+    for: 10m
+    labels:
+      severity: warning
+  - alert: DeploymentReplicasMismatch
+    annotations:
+      description: Desired vs available replica mismatch for 15 minutes.
+      summary: Deployment {{ $labels.deployment }} has unavailable replicas
+    expr: "kube_deployment_spec_replicas{namespace=\"microservices\"}\n  != kube_deployment_status_replicas_available{namespace=\"microservices\"}\n"
+    for: 15m
+    labels:
+      severity: warning

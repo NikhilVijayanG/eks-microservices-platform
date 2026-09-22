@@ -1,0 +1,77 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: microservices
+labels:
+  - pairs:
+      environment: prod
+    includeSelectors: false
+resources:
+  - ../../base/products
+  - ../../base/orders
+  - ../../base/gateway
+  - ../../monitoring
+
+images:
+  - name: products
+    newName: 123456789012.dkr.ecr.us-east-1.amazonaws.com/msplatform/products
+    newTag: prod
+  - name: orders
+    newName: 123456789012.dkr.ecr.us-east-1.amazonaws.com/msplatform/orders
+    newTag: prod
+  - name: gateway
+    newName: 123456789012.dkr.ecr.us-east-1.amazonaws.com/msplatform/gateway
+    newTag: prod
+
+patches:
+  - target:
+      kind: Deployment
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      # hard anti-affinity in prod: never co-locate replicas
+      - op: replace
+        path: /spec/template/spec/affinity/podAntiAffinity
+        value:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: microservices
+      # pin to the spot "apps" node pool
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          workload: apps
+  - target:
+      kind: HorizontalPodAutoscaler
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 20
+  - target:
+      kind: PodDisruptionBudget
+    patch: |
+      - op: replace
+        path: /spec/minAvailable
+        value: 2
+  # HTTPS + redirect on the public ingress (set the ACM ARN)
+  - target:
+      kind: Ingress
+      name: gateway
+    patch: |
+      - op: replace
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1listen-ports
+        value: '[{"HTTP":80},{"HTTPS":443}]'
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1ssl-redirect
+        value: "443"
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1certificate-arn
+        value: arn:aws:acm:us-east-1:123456789012:certificate/REPLACE-ME
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1wafv2-acl-arn
+        value: arn:aws:wafv2:us-east-1:123456789012:regional/webacl/REPLACE-ME/REPLACE-ME

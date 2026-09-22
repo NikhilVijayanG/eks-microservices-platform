@@ -1,0 +1,97 @@
+name: Build & Deploy
+
+# CD pipeline: build changed services -> push to ECR (immutable SHA tags, cosign-signed)
+# -> deploy dev -> smoke test -> deploy prod (protected environment with reviewers)
+on:
+  push:
+    branches: [main]
+    paths: ["services/**", "kubernetes/**", ".github/workflows/deploy.yml"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, prod]
+        default: dev
+      image_tag:
+        description: "Existing image tag to deploy (skip build). Leave blank to build from this commit."
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PROJECT: ${{ vars.PROJECT || 'msplatform' }}
+  SERVICES: '["products","orders","gateway"]'
+
+jobs:
+  # ------------------------------------------------------------------ build & push
+  build:
+    if: inputs.image_tag == ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON('["products","orders","gateway"]') }}
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: docker/setup-buildx-action@v3
+      - name: Build & push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: services
+          file: services/Dockerfile
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            APP_VERSION=${{ steps.meta.outputs.tag }}
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/${{ matrix.service }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+      - name: Trivy gate (CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/${{ matrix.service }}:${{ steps.meta.outputs.tag }}
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign image (keyless, OIDC)
+        env: { COSIGN_YES: "true" }
+        run: cosign sign "${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/${{ matrix.service }}@${{ steps.push.outputs.digest }}"
+
+  # ------------------------------------------------------------------ deploy (reusable job via matrix of one)
+  deploy-dev:
+    needs: [build]
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (github.event_name == 'push' || inputs.environment == 'dev')
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: dev
+      image_tag: ${{ inputs.image_tag || needs.build.outputs.tag }}
+    secrets: inherit
+
+  deploy-prod:
+    needs: [build, deploy-dev]
+    # Requires the PROD_ENABLED repo variable (the prod cluster must exist) or an explicit manual run.
+    if: always() && needs.deploy-dev.result == 'success' && ((github.event_name == 'push' && vars.PROD_ENABLED == 'true') || inputs.environment == 'prod')
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: prod
+      image_tag: ${{ inputs.image_tag || needs.build.outputs.tag }}
+    secrets: inherit

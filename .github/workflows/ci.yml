@@ -1,0 +1,118 @@
+name: CI
+
+# Application pipeline for PRs: unit tests, container build + Trivy scan, manifest validation.
+on:
+  pull_request:
+    paths: ["services/**", "kubernetes/**", ".github/workflows/ci.yml"]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            products: [services/products/**, services/Dockerfile]
+            orders:   [services/orders/**, services/Dockerfile]
+            gateway:  [services/gateway/**, services/Dockerfile]
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  build-scan:
+    needs: [changes, test]
+    if: needs.changes.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: services
+          file: services/Dockerfile
+          build-args: SERVICE=${{ matrix.service }}
+          tags: ${{ matrix.service }}:pr
+          load: true
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.service }}:pr
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-${{ matrix.service }}.sarif
+          category: trivy-${{ matrix.service }}
+      - name: Smoke-run container
+        run: |
+          docker run -d --rm --name smoke -p 8080:8080 ${{ matrix.service }}:pr
+          for i in $(seq 1 20); do curl -fsS localhost:8080/healthz && break; sleep 1; done
+          curl -fsS localhost:8080/metrics | grep -q http_requests_total
+          docker stop smoke
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - name: Install kubeconform + Prometheus Operator CRD schemas
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: kustomize build + kubeconform
+        run: |
+          for e in dev prod; do
+            echo "::group::$e"
+            kubectl kustomize kubernetes/overlays/$e > /tmp/$e.yaml
+            kubeconform -strict -summary -ignore-missing-schemas \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              /tmp/$e.yaml
+            echo "::endgroup::"
+          done
+      - name: Validate PrometheusRule expressions with promtool
+        run: |
+          curl -sSL https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz | tar xz --strip-components=1 --wildcards '*/promtool'
+          yq 'select(.kind == "PrometheusRule") | {"groups": .spec.groups}' /tmp/dev.yaml > /tmp/rules.yaml
+          ./promtool check rules /tmp/rules.yaml
+      - name: Policy check (kube-score)
+        run: |
+          curl -sSL https://github.com/zegl/kube-score/releases/download/v1.19.0/kube-score_1.19.0_linux_amd64.tar.gz | tar xz kube-score
+          ./kube-score score /tmp/prod.yaml --ignore-test pod-networkpolicy --ignore-test container-image-pull-policy --output-format ci || true

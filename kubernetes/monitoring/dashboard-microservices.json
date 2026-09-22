@@ -1,0 +1,122 @@
+{
+  "uid": "microservices-red",
+  "title": "Microservices – RED overview",
+  "tags": ["microservices"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(http_requests_total, service)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Requests / s",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(rate(http_requests_total{service=~\"$service\"}[5m]))", "refId": "A" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Error rate (5xx)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.01 }, { "color": "red", "value": 0.05 }] } } },
+      "targets": [{ "expr": "sum(rate(http_requests_total{service=~\"$service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{service=~\"$service\"}[5m]))", "refId": "A" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "p95 latency",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.25 }, { "color": "red", "value": 0.5 }] } } },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "refId": "A" }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Running pods",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(kube_deployment_status_replicas_available{namespace=\"microservices\"})", "refId": "A" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Request rate by service",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [{ "expr": "sum by (service) (rate(http_requests_total{service=~\"$service\"}[5m]))", "legendFormat": "{{service}}", "refId": "A" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Error ratio by service",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 } },
+      "targets": [{ "expr": "sum by (service) (rate(http_requests_total{service=~\"$service\",status=~\"5..\"}[5m])) / sum by (service) (rate(http_requests_total{service=~\"$service\"}[5m]))", "legendFormat": "{{service}}", "refId": "A" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Latency p50 / p95 / p99",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}} p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}} p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}} p99", "refId": "C" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Upstream dependency latency p95",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (service, upstream, le) (rate(upstream_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}} → {{upstream}}", "refId": "A" }]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "CPU usage vs requests",
+      "gridPos": { "x": 0, "y": 20, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (container) (rate(container_cpu_usage_seconds_total{namespace=\"microservices\", container!=\"\"}[5m]))", "legendFormat": "{{container}} usage", "refId": "A" },
+        { "expr": "sum by (container) (kube_pod_container_resource_requests{namespace=\"microservices\", resource=\"cpu\"})", "legendFormat": "{{container}} requests", "refId": "B" }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Memory working set vs limits",
+      "gridPos": { "x": 8, "y": 20, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "targets": [
+        { "expr": "sum by (container) (container_memory_working_set_bytes{namespace=\"microservices\", container!=\"\"})", "legendFormat": "{{container}} usage", "refId": "A" },
+        { "expr": "sum by (container) (kube_pod_container_resource_limits{namespace=\"microservices\", resource=\"memory\"})", "legendFormat": "{{container}} limit", "refId": "B" }
+      ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "HPA replicas (current vs desired)",
+      "gridPos": { "x": 16, "y": 20, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"microservices\"}", "legendFormat": "{{horizontalpodautoscaler}} current", "refId": "A" },
+        { "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"microservices\"}", "legendFormat": "{{horizontalpodautoscaler}} desired", "refId": "B" }
+      ]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Orders created / min (business KPI)",
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum by (result) (rate(orders_created_total[5m])) * 60", "legendFormat": "{{result}}", "refId": "A" }]
+    },
+    {
+      "id": 13, "type": "logs", "title": "Recent error logs (Loki)",
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 7 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "expr": "{namespace=\"microservices\"} |= \"error\"", "refId": "A" }]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - alerts.yaml
+# Grafana's sidecar imports any ConfigMap labelled grafana_dashboard=1 from any namespace.
+configMapGenerator:
+  - name: dashboard-microservices
+    files:
+      - dashboard-microservices.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: Microservices

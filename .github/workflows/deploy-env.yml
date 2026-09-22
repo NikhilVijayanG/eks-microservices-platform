@@ -1,0 +1,120 @@
+name: Deploy to environment
+
+# Reusable: render the Kustomize overlay with the given image tag, apply, wait for rollout,
+# smoke-test through the gateway, and roll back automatically if anything fails.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PROJECT: ${{ vars.PROJECT || 'msplatform' }}
+  NAMESPACE: microservices
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.url.outputs.gateway }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: azure/setup-kubectl@v4
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "${PROJECT}-${{ inputs.environment }}"
+
+      - name: Verify image signatures
+        uses: sigstore/cosign-installer@v3
+      - run: |
+          REG=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com
+          for s in products orders gateway; do
+            cosign verify "$REG/$PROJECT/$s:${{ inputs.image_tag }}" \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+            echo "verified $s:${{ inputs.image_tag }}"
+          done
+
+      - name: Install kustomize
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s -- 5.4.3 /usr/local/bin >/dev/null
+          kustomize version
+
+      - name: Render manifests
+        id: render
+        run: |
+          REG=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com
+          cd kubernetes/overlays/${{ inputs.environment }}
+          for s in products orders gateway; do
+            kustomize edit set image "$s=$REG/$PROJECT/$s:${{ inputs.image_tag }}"
+          done
+          kustomize build . > "$RUNNER_TEMP/manifests.yaml"
+          echo "rendered $(grep -c '^kind:' "$RUNNER_TEMP/manifests.yaml") resources"
+          grep 'image: ' "$RUNNER_TEMP/manifests.yaml" | sort -u
+
+      - name: Server-side dry run
+        run: kubectl apply --server-side --dry-run=server -f "$RUNNER_TEMP/manifests.yaml"
+
+      - name: Record previous revisions (for rollback)
+        run: |
+          for s in products orders gateway; do
+            kubectl -n "$NAMESPACE" rollout history deploy/$s 2>/dev/null | tail -1 || true
+          done
+
+      - name: Apply
+        run: |
+          kubectl apply --server-side --force-conflicts -f "$RUNNER_TEMP/manifests.yaml"
+          for s in products orders gateway; do
+            kubectl -n "$NAMESPACE" annotate deploy/$s kubernetes.io/change-cause="${{ github.workflow }} #${{ github.run_number }} ${{ inputs.image_tag }}" --overwrite
+          done
+
+      - name: Wait for rollout
+        id: rollout
+        run: |
+          for s in products orders gateway; do
+            kubectl -n "$NAMESPACE" rollout status deploy/$s --timeout=5m
+          done
+
+      - name: Smoke test via gateway
+        id: smoke
+        run: |
+          kubectl -n "$NAMESPACE" run smoke-${{ github.run_id }} --rm -i --restart=Never --image=curlimages/curl:8.10.1 --command -- sh -c '
+            set -e
+            for i in $(seq 1 30); do curl -fsS http://gateway:8080/healthz && break; sleep 2; done
+            curl -fsS http://gateway:8080/api/products | grep -q items
+            curl -fsS -X POST http://gateway:8080/api/orders -H "content-type: application/json" -d "{\"productId\":\"p-100\",\"quantity\":1}" | grep -q total
+            echo; echo "smoke OK"'
+
+      - name: Rollback on failure
+        if: failure() && (steps.rollout.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        run: |
+          echo "::error::Deployment failed – rolling back"
+          for s in products orders gateway; do
+            kubectl -n "$NAMESPACE" rollout undo deploy/$s || true
+            kubectl -n "$NAMESPACE" rollout status deploy/$s --timeout=3m || true
+          done
+          kubectl -n "$NAMESPACE" get pods -o wide
+          kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30
+
+      - name: Gateway URL
+        id: url
+        run: |
+          host=$(kubectl -n "$NAMESPACE" get ingress gateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+          echo "gateway=http://${host:-pending}" >> "$GITHUB_OUTPUT"
+          { echo "### Deployed \`${{ inputs.image_tag }}\` to **${{ inputs.environment }}**"; echo "Gateway: http://${host:-pending}"; echo; echo '```'; kubectl -n "$NAMESPACE" get deploy,hpa; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

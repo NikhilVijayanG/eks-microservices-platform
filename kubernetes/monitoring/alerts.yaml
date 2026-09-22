@@ -1,0 +1,99 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: microservices-alerts
+  labels:
+    app.kubernetes.io/part-of: microservices
+spec:
+  groups:
+    - name: microservices.slo
+      rules:
+        # ---- recording rules (RED: rate, errors, duration) ----------------
+        - record: service:http_requests:rate5m
+          expr: sum by (service, route) (rate(http_requests_total[5m]))
+        - record: service:http_errors:ratio5m
+          expr: |
+            sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+              /
+            sum by (service) (rate(http_requests_total[5m]))
+        - record: service:http_latency_p95:5m
+          expr: histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m])))
+        - record: service:http_latency_p99:5m
+          expr: histogram_quantile(0.99, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m])))
+
+    - name: microservices.alerts
+      rules:
+        - alert: ServiceHighErrorRate
+          expr: service:http_errors:ratio5m > 0.05
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "{{ $labels.service }} 5xx ratio is {{ $value | humanizePercentage }}"
+            description: "More than 5% of requests to {{ $labels.service }} failed over the last 5 minutes."
+            runbook_url: https://github.com/OWNER/REPO/blob/main/docs/runbooks/high-error-rate.md
+
+        - alert: ServiceHighLatencyP95
+          expr: service:http_latency_p95:5m > 0.5
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.service }} p95 latency is {{ $value | humanizeDuration }}"
+            description: "p95 latency above 500ms for 10 minutes."
+
+        - alert: ServiceDown
+          expr: sum by (service) (up{job=~"products|orders|gateway"}) == 0
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "{{ $labels.service }} has no healthy scrape targets"
+            description: "Prometheus cannot scrape any pod of {{ $labels.service }}."
+
+        - alert: UpstreamDependencyFailing
+          expr: |
+            sum by (service, upstream) (rate(upstream_request_duration_seconds_count{status=~"5..|error"}[5m]))
+              /
+            sum by (service, upstream) (rate(upstream_request_duration_seconds_count[5m])) > 0.1
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.service }} -> {{ $labels.upstream }} failing"
+            description: "More than 10% of calls from {{ $labels.service }} to {{ $labels.upstream }} are failing."
+
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace="microservices"}[15m]) > 3
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }} restarting"
+            description: "Container {{ $labels.container }} restarted more than 3 times in 15 minutes."
+
+        - alert: HPAAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="microservices"}
+              >= kube_horizontalpodautoscaler_spec_max_replicas{namespace="microservices"}
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} pinned at max"
+            description: "Consider raising maxReplicas or investigating load."
+
+        - alert: ContainerMemoryNearLimit
+          expr: |
+            max by (namespace, pod, container) (container_memory_working_set_bytes{namespace="microservices", container!=""})
+              /
+            max by (namespace, pod, container) (kube_pod_container_resource_limits{namespace="microservices", resource="memory"}) > 0.9
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} memory > 90% of limit"
+            description: "Risk of OOMKill."
+
+        - alert: DeploymentReplicasMismatch
+          expr: |
+            kube_deployment_spec_replicas{namespace="microservices"}
+              != kube_deployment_status_replicas_available{namespace="microservices"}
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} has unavailable replicas"
+            description: "Desired vs available replica mismatch for 15 minutes."

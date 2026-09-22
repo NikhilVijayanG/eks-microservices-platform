@@ -53,9 +53,13 @@ jobs:
           done
 
       - name: Install kustomize
+        env: { KUSTOMIZE_VERSION: "5.6.0" }
         run: |
-          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s -- 5.6.0 /usr/local/bin >/dev/null
-          kustomize version
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" kustomize
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/kustomize" version
 
       - name: Render manifests
         id: render
